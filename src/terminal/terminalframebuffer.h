@@ -156,8 +156,9 @@ public:
   std::string debug_contents( void ) const;
 
   bool empty( void ) const { return contents.empty(); }
-  /* 32 seems like a reasonable limit on combining characters */
-  bool full( void ) const { return contents.size() >= 32; }
+  /* 128 bytes of UTF-8 — fits the longest realistic grapheme clusters,
+     such as the family-of-four ZWJ emoji (≈25 bytes). */
+  bool full( void ) const { return contents.size() >= 128; }
   void clear( void ) { contents.clear(); }
 
   bool is_blank( void ) const
@@ -288,10 +289,32 @@ private:
   int width, height;
 
   void new_grapheme( void );
+  void reset_grapheme( void );
   void snap_cursor_to_border( void );
+
+public:
+  /* Drop just the cluster break-detection state, leaving the anchor
+     (combining_char_col/row) and cursor untouched.  Called from
+     print() when continues_grapheme() reported a continuation but
+     the anchor cell turns out to be empty (e.g. wiped by ED/EL
+     between print()s) — we want the next codepoint to be treated as
+     a fresh cluster, but the case-0 fallback path should still
+     attach to the cell the prior cluster was anchored on. */
+  void clear_grapheme_state( void );
+
+private:
 
   int cursor_col, cursor_row;
   int combining_char_col, combining_char_row;
+
+  /* UAX #29 grapheme cluster tracking. last_grapheme_codepoint and
+     grapheme_break_state describe the codepoint chain ending at the
+     most recent print(); has_last_codepoint distinguishes "no prior
+     codepoint" from "prior codepoint was U+0000" without conflating
+     them on a sentinel. */
+  int32_t last_grapheme_codepoint;
+  int32_t grapheme_break_state;
+  bool has_last_codepoint;
 
   bool default_tabs;
   std::vector<bool> tabs;
@@ -341,11 +364,18 @@ public:
 
   void move_row( int N, bool relative = false );
   void move_col( int N, bool relative = false, bool implicit = false );
+  /* Advance cursor by one column without touching the grapheme
+     anchor or break-detection state.  Used when an in-progress
+     cluster (e.g. a regional-indicator pair) widens its cell from
+     one column to two: the cell base remains at combining_char_col,
+     but the cursor must skip past the newly-overlapped right half. */
+  void widen_cluster_cursor( void );
 
   int get_cursor_col( void ) const { return cursor_col; }
   int get_cursor_row( void ) const { return cursor_row; }
   int get_combining_char_col( void ) const { return combining_char_col; }
   int get_combining_char_row( void ) const { return combining_char_row; }
+  bool continues_grapheme( wchar_t ch );
   int get_width( void ) const { return width; }
   int get_height( void ) const { return height; }
 

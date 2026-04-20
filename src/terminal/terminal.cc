@@ -68,6 +68,56 @@ void Emulator::print( const Parser::Print* act )
    */
   const int chwidth = ch == L'\0' ? -1 : ( Cell::isprint_iso8859_1( ch ) ? 1 : mosh_wcwidth( ch ) );
 
+  if ( chwidth == -1 ) {
+    /* unprintable character */
+    return;
+  }
+
+  /* Check if this codepoint continues the current grapheme cluster.
+     A "continuation" still requires a base in the anchor cell; ED/EL
+     can wipe the cell out from under us between print()s, in which
+     case we treat the codepoint as opening a fresh cluster (the
+     fallback branch below) so it does not corrupt the cleared cell. */
+  if ( fb.ds.continues_grapheme( ch ) ) {
+    Cell* combining_cell = fb.get_combining_cell();
+    if ( combining_cell == NULL ) {
+      return;
+    }
+    if ( !combining_cell->empty() ) {
+      if ( !combining_cell->full() ) {
+        combining_cell->append( ch );
+      }
+      /* VS16 (emoji presentation) or a paired regional indicator
+         promotes a single-column cell to a 2-column flag/emoji glyph.
+         We only widen if there is room on the right; otherwise we
+         silently leave the cell narrow rather than corrupt neighbours. */
+      const bool should_widen
+        = !combining_cell->get_wide() && ( ch == 0xFE0F || ( ch >= 0x1F1E6 && ch <= 0x1F1FF ) );
+      if ( should_widen ) {
+        const int ccol = fb.ds.get_combining_char_col();
+        if ( ccol + 1 < fb.ds.get_width() ) {
+          combining_cell->set_wide( true );
+          fb.reset_cell( fb.get_mutable_cell( fb.ds.get_combining_char_row(), ccol + 1 ) );
+          if ( fb.ds.get_cursor_col() == ccol + 1 ) {
+            /* Advance past the newly-overlapped right half without
+               re-anchoring the cluster onto it. */
+            fb.ds.widen_cluster_cursor();
+          }
+        }
+      }
+      return;
+    }
+    /* Anchor cell was cleared (e.g. by ED/EL) since we last printed.
+       Drop the cluster context so this codepoint is treated as the
+       start of a new cluster: combining marks reach the case-0
+       fallback path below (which sets the fallback flag on the
+       cleared cell), and spacing characters take the normal cell
+       placement path. The anchor itself is preserved so that
+       fallback writes land on the cleared cell, matching pre-PR
+       behavior. */
+    fb.ds.clear_grapheme_state();
+  }
+
   Cell* this_cell = fb.get_mutable_cell();
 
   switch ( chwidth ) {
@@ -116,7 +166,8 @@ void Emulator::print( const Parser::Print* act )
       fb.ds.move_col( chwidth, true, true );
 
       break;
-    case 0: /* combining character */
+    case 0: /* combining character that opens a new cluster (no base
+               codepoint has been printed yet) */
     {
       Cell* combining_cell = fb.get_combining_cell(); /* can be null if we were resized */
       if ( combining_cell == NULL ) {                 /* character is now offscreen */
@@ -137,8 +188,6 @@ void Emulator::print( const Parser::Print* act )
         combining_cell->append( ch );
       }
     } break;
-    case -1: /* unprintable character */
-      break;
     default:
       assert( !"unexpected character width from mosh_wcwidth()" );
       break;

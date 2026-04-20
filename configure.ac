@@ -253,10 +253,9 @@ AC_CHECK_LIB([z], [compress],
    LIBS="$ZLIB_LIBS $LIBS"],
   [AC_MSG_ERROR([Unable to find zlib.])])
 
-# utf8proc provides up-to-date character width data. The system wcwidth()
-# (notably on macOS) is years out of date and returns -1 for valid
-# printable codepoints such as U+23F5, causing mosh to drop the character.
-# Prefer pkg-config; fall back to direct probing for systems without it.
+# utf8proc provides up-to-date character width data and grapheme cluster
+# segmentation. Prefer pkg-config (so include/lib paths come from the
+# package), but fall back to direct probing for systems without it.
 PKG_CHECK_MODULES([UTF8PROC], [libutf8proc],
   [CPPFLAGS="$CPPFLAGS $UTF8PROC_CFLAGS"
    LIBS="$UTF8PROC_LIBS $LIBS"],
@@ -265,6 +264,12 @@ PKG_CHECK_MODULES([UTF8PROC], [libutf8proc],
    AC_CHECK_LIB([utf8proc], [utf8proc_charwidth],
      [LIBS="-lutf8proc $LIBS"],
      [AC_MSG_ERROR([Unable to link against libutf8proc (utf8proc_charwidth missing — need utf8proc >= 2.0).])])])
+
+# We rely on stateful grapheme cluster segmentation introduced in
+# utf8proc 2.0. Verify the symbol exists so failures surface at
+# configure time rather than at link time.
+AC_CHECK_FUNC([utf8proc_grapheme_break_stateful], [],
+  [AC_MSG_ERROR([utf8proc is too old: utf8proc_grapheme_break_stateful is required (utf8proc >= 2.0).])])
 
 AC_SEARCH_LIBS([socket], [socket network])
 AC_SEARCH_LIBS([inet_addr], [nsl])

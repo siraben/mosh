@@ -33,6 +33,7 @@
 #include <cassert>
 #include <cstdio>
 #include <cstdlib>
+#include <utf8proc.h>
 
 #include "src/terminal/terminalframebuffer.h"
 
@@ -62,7 +63,8 @@ void DrawState::reinitialize_tabs( unsigned int start )
 
 DrawState::DrawState( int s_width, int s_height )
   : width( s_width ), height( s_height ), cursor_col( 0 ), cursor_row( 0 ), combining_char_col( 0 ),
-    combining_char_row( 0 ), default_tabs( true ), tabs( s_width ), scrolling_region_top_row( 0 ),
+    combining_char_row( 0 ), last_grapheme_codepoint( 0 ), grapheme_break_state( 0 ),
+    has_last_codepoint( false ), default_tabs( true ), tabs( s_width ), scrolling_region_top_row( 0 ),
     scrolling_region_bottom_row( height - 1 ), renditions( 0 ), hyperlink(), save(), next_print_will_wrap( false ),
     origin_mode( false ), auto_wrap_mode( true ), insert_mode( false ), cursor_visible( true ),
     reverse_video( false ), bracketed_paste( false ), mouse_reporting_mode( MOUSE_REPORTING_NONE ),
@@ -112,10 +114,61 @@ void Framebuffer::scroll( int N )
   }
 }
 
+/* Anchor a fresh grapheme cluster at the current cursor position
+   without disturbing the break-detection state.  Called after every
+   printed base character so that subsequent combining marks attach
+   to the cell we just wrote, while the cluster chain (e.g. RI pairs,
+   Extended_Pictographic ZWJ sequences) can keep extending. */
 void DrawState::new_grapheme( void )
 {
   combining_char_col = cursor_col;
   combining_char_row = cursor_row;
+}
+
+/* Hard reset of the grapheme cluster: re-anchor *and* drop the
+   break-detection state.  Called whenever the cursor moves for any
+   reason other than implicit advance after print() — explicit cursor
+   motion, line wrap, scroll, save/restore, etc. */
+void DrawState::reset_grapheme( void )
+{
+  combining_char_col = cursor_col;
+  combining_char_row = cursor_row;
+  last_grapheme_codepoint = 0;
+  grapheme_break_state = 0;
+  has_last_codepoint = false;
+}
+
+bool DrawState::continues_grapheme( wchar_t ch )
+{
+  const int32_t cp = static_cast<int32_t>( ch );
+  if ( !has_last_codepoint ) {
+    last_grapheme_codepoint = cp;
+    has_last_codepoint = true;
+    return false;
+  }
+  const bool is_break
+    = utf8proc_grapheme_break_stateful( last_grapheme_codepoint, cp, &grapheme_break_state );
+  last_grapheme_codepoint = cp;
+  if ( is_break ) {
+    /* utf8proc requires the state be cleared at every cluster
+       boundary so that the next cluster starts fresh. */
+    grapheme_break_state = 0;
+  }
+  return !is_break;
+}
+
+void DrawState::widen_cluster_cursor( void )
+{
+  cursor_col++;
+  next_print_will_wrap = ( cursor_col >= width );
+  snap_cursor_to_border();
+}
+
+void DrawState::clear_grapheme_state( void )
+{
+  last_grapheme_codepoint = 0;
+  grapheme_break_state = 0;
+  has_last_codepoint = false;
 }
 
 void DrawState::snap_cursor_to_border( void )
@@ -139,13 +192,19 @@ void DrawState::move_row( int N, bool relative )
   }
 
   snap_cursor_to_border();
-  new_grapheme();
+  /* Vertical motion always ends the current cluster, whether driven
+     by explicit cursor motion or implicit wrap/scroll. */
+  reset_grapheme();
   next_print_will_wrap = false;
 }
 
 void DrawState::move_col( int N, bool relative, bool implicit )
 {
   if ( implicit ) {
+    /* Anchor the (possibly continuing) cluster on the cell we just
+       wrote, before advancing the cursor.  Crucially, do *not* drop
+       the break-detection state — RI pairs and Extended_Pictographic
+       ZWJ sequences need it to span across base codepoints. */
     new_grapheme();
   }
 
@@ -161,7 +220,8 @@ void DrawState::move_col( int N, bool relative, bool implicit )
 
   snap_cursor_to_border();
   if ( !implicit ) {
-    new_grapheme();
+    /* Explicit horizontal motion is a cluster boundary. */
+    reset_grapheme();
     next_print_will_wrap = false;
   }
 }
@@ -247,7 +307,7 @@ void DrawState::set_scrolling_region( int top, int bottom )
 
   if ( origin_mode ) {
     snap_cursor_to_border();
-    new_grapheme();
+    reset_grapheme();
   }
 }
 
@@ -299,7 +359,7 @@ void DrawState::restore_cursor( void )
   origin_mode = save.origin_mode;
 
   snap_cursor_to_border(); /* we could have resized in between */
-  new_grapheme();
+  reset_grapheme();
 }
 
 void Framebuffer::insert_line( int before_row, int count )
