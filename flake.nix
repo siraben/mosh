@@ -32,6 +32,8 @@
 
           # Keep the Nix-specific path substitution patches from nixpkgs,
           # but drop the protobuf3 fetchpatch (already in our source tree).
+          buildInputs = old.buildInputs ++ [ final.utf8proc ];
+
           patches = [
             (nixpkgs + "/pkgs/by-name/mo/mosh/ssh_path.patch")
             (nixpkgs + "/pkgs/by-name/mo/mosh/mosh-client_path.patch")
